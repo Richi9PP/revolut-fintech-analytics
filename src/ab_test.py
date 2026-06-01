@@ -233,6 +233,9 @@ def run_full_readout(db_path: str = DB_PATH) -> dict:
 
     if not guardrail.significant:
         guardrail_note = "within noise."
+    elif guardrail.abs_lift >= 0:
+        guardrail_note = ("statistically significant but in a favourable "
+                          "direction, so not a concern.")
     elif not guardrail_breached:
         guardrail_note = ("statistically significant but below the "
                           f"{PRACTICAL_GUARDRAIL_PCT}% practical threshold, "
