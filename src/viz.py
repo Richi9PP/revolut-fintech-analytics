@@ -96,17 +96,12 @@ def metric_comparison(readout: dict) -> str:
 def bayesian_posterior(readout: dict) -> str:
     """Visualise the Beta posteriors of the primary metric."""
     from scipy.stats import beta as beta_dist
-    con = _con()
-    g = pd.read_sql_query(
-        """SELECT experiment_group,
-                  SUM(CASE WHEN r=1 THEN 1 ELSE 0 END) s, COUNT(*) n FROM (
-             SELECT u.experiment_group,
-               MAX(CASE WHEN julianday(DATE(t.ts))-julianday(DATE(u.signup_date))
-                        BETWEEN 30 AND 89 THEN 1 ELSE 0 END) r
-             FROM users u LEFT JOIN transactions t ON t.user_id=u.user_id
-             GROUP BY u.user_id, u.experiment_group)
-           GROUP BY experiment_group""", con)
-    con.close()
+    from ab_test import load_user_metrics
+    # Reuse the single retained_d30 definition rather than re-querying the DB.
+    g = (load_user_metrics(DB_PATH)
+         .groupby("experiment_group")["retained_d30"]
+         .agg(s="sum", n="count")
+         .reset_index())
     x = np.linspace(0.30, 0.60, 600)
     fig, ax = plt.subplots(figsize=(7, 4.2))
     for _, row in g.iterrows():

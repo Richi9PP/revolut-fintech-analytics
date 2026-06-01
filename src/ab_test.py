@@ -29,6 +29,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(ROOT, "data", "warehouse.db")
 
 WEEKS_IN_WINDOW = 90 / 7.0
+Z95 = 1.96  # normal critical value for a two-sided 95% CI
+
+
+def _wald_ci(abs_lift: float, var_t: float, n_t: int,
+             var_c: float, n_c: int) -> tuple[float, float]:
+    """Wald 95% CI on a difference, given each arm's variance and size."""
+    se = np.sqrt(var_t / n_t + var_c / n_c)
+    return abs_lift - Z95 * se, abs_lift + Z95 * se
 
 
 @dataclass
@@ -89,8 +97,8 @@ def test_retention(df: pd.DataFrame) -> MetricResult:
     abs_lift = p_t - p_c
 
     # 95% CI on the difference of two proportions (Wald).
-    se = np.sqrt(p_c * (1 - p_c) / len(c) + p_t * (1 - p_t) / len(t))
-    lo, hi = abs_lift - 1.96 * se, abs_lift + 1.96 * se
+    lo, hi = _wald_ci(abs_lift, p_t * (1 - p_t), len(t),
+                      p_c * (1 - p_c), len(c))
 
     return MetricResult(
         name="d30_retention",
@@ -120,8 +128,7 @@ def test_activity(df: pd.DataFrame) -> MetricResult:
 
     abs_lift = t.mean() - c.mean()
     # CI on the difference of means (Welch).
-    se = np.sqrt(t.var(ddof=1) / len(t) + c.var(ddof=1) / len(c))
-    lo, hi = abs_lift - 1.96 * se, abs_lift + 1.96 * se
+    lo, hi = _wald_ci(abs_lift, t.var(ddof=1), len(t), c.var(ddof=1), len(c))
 
     return MetricResult(
         name="weekly_active_transactions",
@@ -146,15 +153,15 @@ def test_guardrail(df: pd.DataFrame) -> MetricResult:
     t = sub[sub.experiment_group == "treatment"]["avg_txn_value"]
     tstat, p = stats.ttest_ind(t, c, equal_var=False)
     abs_lift = t.mean() - c.mean()
-    se = np.sqrt(t.var(ddof=1) / len(t) + c.var(ddof=1) / len(c))
+    lo, hi = _wald_ci(abs_lift, t.var(ddof=1), len(t), c.var(ddof=1), len(c))
     return MetricResult(
         name="avg_transaction_value_guardrail",
         control=round(c.mean(), 2),
         treatment=round(t.mean(), 2),
         abs_lift=round(abs_lift, 2),
         rel_lift_pct=round(abs_lift / c.mean() * 100, 2),
-        ci95_low=round(abs_lift - 1.96 * se, 2),
-        ci95_high=round(abs_lift + 1.96 * se, 2),
+        ci95_low=round(lo, 2),
+        ci95_high=round(hi, 2),
         p_value=round(float(p), 5),
         significant=bool(p < 0.05),
         test="Welch t-test (guardrail: expect NON-significant)",
@@ -224,17 +231,21 @@ def run_full_readout(db_path: str = DB_PATH) -> dict:
     ship = retention.significant and retention.abs_lift > 0 and not guardrail_breached
     decision = "SHIP" if ship else "DO NOT SHIP"
 
+    if not guardrail.significant:
+        guardrail_note = "within noise."
+    elif not guardrail_breached:
+        guardrail_note = ("statistically significant but below the "
+                          f"{PRACTICAL_GUARDRAIL_PCT}% practical threshold, "
+                          "so not a blocker.")
+    else:
+        guardrail_note = "a real regression — blocks the launch."
+
     decision_rationale = (
         f"Primary metric +{retention.abs_lift}pp (p={retention.p_value}, "
         f"95% CI [{retention.ci95_low}, {retention.ci95_high}]). "
         f"Guardrail moved {guardrail.rel_lift_pct:+}% "
         f"(p={guardrail.p_value}) - "
-        + ("statistically significant but below the "
-           f"{PRACTICAL_GUARDRAIL_PCT}% practical threshold, so not a blocker."
-           if guardrail.significant and not guardrail_breached
-           else "within noise."
-           if not guardrail.significant
-           else "a real regression — blocks the launch.")
+        + guardrail_note
     )
 
     return {
